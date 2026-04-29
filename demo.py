@@ -33,6 +33,12 @@ import numpy as np
 import torch
 from tqdm.auto import tqdm
 
+from lingbot_map.utils.prediction_saver import (
+    save_camera_tum_trajectory,
+    save_depth_frames,
+    save_point_cloud_counts,
+)
+from lingbot_map.utils.gs_dataset_export import export_lingbot_gs_bundle
 from lingbot_map.utils.pose_enc import pose_encoding_to_extri_intri
 from lingbot_map.utils.geometry import closed_form_inverse_se3_general
 from lingbot_map.utils.load_fn import load_and_preprocess_images
@@ -353,6 +359,20 @@ def main():
                         help="Save sky mask visualizations (original | mask | overlay) to this directory")
     parser.add_argument("--export_preprocessed", type=str, default=None,
                         help="Export stride-sampled, resized/cropped images to this folder")
+    parser.add_argument("--save_depth_dir", type=str, default=None,
+                        help="Save per-frame predicted depth maps to this folder (.npy + uint16 .png)")
+    parser.add_argument(
+        "--export_3dgs_bundle_dir",
+        type=str,
+        default=None,
+        help="Export lingbot-map predictions to a 3DGS bridge dataset directory.",
+    )
+    parser.add_argument(
+        "--export_3dgs_copy_images",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Copy source images into 3DGS bundle (default true). Use --no-export_3dgs_copy_images to symlink.",
+    )
 
     args = parser.parse_args()
     assert args.image_folder or args.video_path, \
@@ -496,6 +516,69 @@ def main():
         images_for_post = images
 
     predictions, images_cpu = postprocess(predictions, images_for_post)
+
+    if args.save_depth_dir:
+        if "depth" in predictions:
+            depth_np = predictions["depth"].detach().cpu().numpy()
+            save_depth_frames(depth_np, args.save_depth_dir, source_paths=paths)
+            print(f"Saved {depth_np.shape[0]} depth frames to {args.save_depth_dir}")
+        else:
+            print("Depth output not found in predictions; skipping depth export.")
+
+        if "world_points" in predictions:
+            world_points_np = predictions["world_points"].detach().cpu().numpy()
+            world_points_conf_np = None
+            if "world_points_conf" in predictions:
+                world_points_conf_np = predictions["world_points_conf"].detach().cpu().numpy()
+            save_point_cloud_counts(
+                world_points=world_points_np,
+                output_dir=args.save_depth_dir,
+                source_paths=paths,
+                world_points_conf=world_points_conf_np,
+                conf_threshold=args.conf_threshold,
+            )
+            print(f"Saved per-frame point-cloud counts to {args.save_depth_dir}/point_cloud_counts.txt")
+        else:
+            print("world_points output not found in predictions; skipping point-cloud count export.")
+
+        if "extrinsic" in predictions and "intrinsic" in predictions:
+            extrinsic_np = predictions["extrinsic"].detach().cpu().numpy()
+            intrinsic_np = predictions["intrinsic"].detach().cpu().numpy()
+            save_camera_tum_trajectory(
+                extrinsic_c2w=extrinsic_np,
+                intrinsic=intrinsic_np,
+                output_dir=args.save_depth_dir,
+            )
+            print(f"Saved camera TUM trajectory to {args.save_depth_dir}/camera_trajectory_tum.txt")
+            print(f"Saved camera intrinsics to {args.save_depth_dir}/camera_intrinsics.txt")
+        else:
+            print("Camera extrinsic/intrinsic not found in predictions; skipping TUM export.")
+
+    if args.export_3dgs_bundle_dir:
+        required_keys = {"world_points", "extrinsic", "intrinsic"}
+        missing = [k for k in required_keys if k not in predictions]
+        if missing:
+            print(f"Missing required keys for 3DGS export: {missing}. Skipping bundle export.")
+        else:
+            world_points_np = predictions["world_points"].detach().cpu().numpy()
+            extrinsic_np = predictions["extrinsic"].detach().cpu().numpy()
+            intrinsic_np = predictions["intrinsic"].detach().cpu().numpy()
+            images_np = images_cpu.detach().cpu().numpy()
+            world_points_conf_np = None
+            if "world_points_conf" in predictions:
+                world_points_conf_np = predictions["world_points_conf"].detach().cpu().numpy()
+            export_lingbot_gs_bundle(
+                output_dir=args.export_3dgs_bundle_dir,
+                source_paths=paths,
+                extrinsic_c2w=extrinsic_np,
+                intrinsic=intrinsic_np,
+                world_points=world_points_np,
+                images_chw=images_np,
+                world_points_conf=world_points_conf_np,
+                conf_threshold=args.conf_threshold,
+                copy_images=args.export_3dgs_copy_images,
+            )
+            print(f"Exported 3DGS bridge bundle to {args.export_3dgs_bundle_dir}")
 
     # ── Visualize ────────────────────────────────────────────────────────────
     try:

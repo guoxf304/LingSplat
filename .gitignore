@@ -1,13 +1,26 @@
+# 深度学习模型与权重
+*.pth
+*.pt
+*.ckpt
+checkpoints/
+
+# 3DGS 与 SLAM 生成文件
+*.ply
+outputs/
+renders/
+cameras.json
+point_cloud/
+
+# 数据集与日志
+data/
+datasets/
+logs/
+wandb/
+*.mp4
+example/*.mp4
+example/testvideo/
+example/sushe/
+
+# Python 缓存
 __pycache__/
-*.pyc
-*.pyo
-*.egg-info/
-dist/
-build/
-*.so
-.eggs/
-demo_render/
-CLAUDE.md
-.claude/
-.agents/
-skyseg.onnx
+*.py[cod]
