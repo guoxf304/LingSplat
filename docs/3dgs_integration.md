@@ -3,15 +3,19 @@
 This project vendors 3DGS code under `third_party/gaussian_splatting_core` and adds a
 custom `LingbotMap` scene reader to avoid large changes in either upstream repository.
 
-### 1) Export bridge bundle
+### 1) Step A: export bundle from Lingbot-Map
 
-Run `demo.py` with:
+Run `demo.py` directly (or use the helper script below):
 
 ```bash
 python demo.py \
   --model_path checkpoints/lingbot-map.pt \
   --image_folder example/loop \
-  --export_3dgs_bundle_dir outputs/gs_bundle
+  --save_depth_dir outputs/depth_frames \
+  --export_3dgs_bundle_dir outputs/depth_frames \
+  --export_3dgs_points_source depth \
+  --export_3dgs_use_viewer_point_logic \
+  --downsample_factor 32
 ```
 
 Generated bundle files:
@@ -19,16 +23,47 @@ Generated bundle files:
 - `images/` (frame images)
 - `camera_trajectory_tum.txt` (`frame tx ty tz qx qy qz qw`, c2w)
 - `camera_intrinsics.txt` (`frame fx fy cx cy`)
-- `init_points.npz` (`xyz`, `rgb`, `frame_id`, optional `conf`)
 - `init_points.ply` (for quick visualization/debug)
 - `meta.json`
 
-### 2) Train with vendored 3DGS
+`init_points.ply` is written from the exported point set. You can downsample at
+export time so the saved PLY is already downsampled (instead of full-resolution points):
+
+```bash
+python demo.py \
+  --model_path checkpoints/lingbot-map.pt \
+  --image_folder example/loop \
+  --save_depth_dir outputs/depth_frames \
+  --export_3dgs_bundle_dir outputs/depth_frames \
+  --export_3dgs_init_sample_ratio 0.5 \
+  --export_3dgs_init_max_points 200000 \
+  --export_3dgs_init_sample_seed 42
+```
+
+Equivalent helper script:
+
+```bash
+./scripts/export_3dgs_bundle_from_lingbot.sh \
+  checkpoints/lingbot-map.pt \
+  example/loop \
+  outputs/depth_frames
+```
+
+After this step finishes, restart/launch a new process for 3DGS training.
+
+### 2) Step B: restart and train vendored 3DGS
 
 ```bash
 python third_party/gaussian_splatting_core/train.py \
-  -s outputs/gs_bundle \
+  -s outputs/depth_frames \
   --dataset_type lingbot_map
+```
+
+Equivalent helper script:
+
+```bash
+./scripts/train_3dgs_from_bundle.sh \
+  outputs/depth_frames
 ```
 
 ### 3) Random-uniform initialization downsampling
@@ -43,7 +78,7 @@ Example:
 
 ```bash
 python third_party/gaussian_splatting_core/train.py \
-  -s outputs/gs_bundle \
+  -s outputs/depth_frames \
   --dataset_type lingbot_map \
   --init_max_points 200000 \
   --init_sample_ratio 0.5 \
@@ -51,7 +86,7 @@ python third_party/gaussian_splatting_core/train.py \
   --iterations 7000
 ```
 
-### 4) One-command bridge pipeline
+### 4) Optional one-command bridge pipeline
 
 ```bash
 ./scripts/train_3dgs_from_lingbot.sh \

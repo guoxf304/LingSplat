@@ -36,11 +36,10 @@ from tqdm.auto import tqdm
 from lingbot_map.utils.prediction_saver import (
     save_camera_tum_trajectory,
     save_depth_frames,
-    save_point_cloud_counts,
 )
 from lingbot_map.utils.gs_dataset_export import export_lingbot_gs_bundle
 from lingbot_map.utils.pose_enc import pose_encoding_to_extri_intri
-from lingbot_map.utils.geometry import closed_form_inverse_se3_general
+from lingbot_map.utils.geometry import closed_form_inverse_se3_general, unproject_depth_map_to_point_map
 from lingbot_map.utils.load_fn import load_and_preprocess_images
 
 
@@ -350,7 +349,7 @@ def main():
     # Visualization
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--conf_threshold", type=float, default=1.5)
-    parser.add_argument("--downsample_factor", type=int, default=10)
+    parser.add_argument("--downsample_factor", type=int, default=32)
     parser.add_argument("--point_size", type=float, default=0.00001)
     parser.add_argument("--mask_sky", action="store_true", help="Apply sky segmentation to filter out sky points")
     parser.add_argument("--sky_mask_dir", type=str, default=None,
@@ -372,6 +371,56 @@ def main():
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Copy source images into 3DGS bundle (default true). Use --no-export_3dgs_copy_images to symlink.",
+    )
+    parser.add_argument(
+        "--export_3dgs_init_sample_ratio",
+        type=float,
+        default=0.03125,
+        help="Random-uniform point downsample ratio applied before writing init_points.(npz|ply).",
+    )
+    parser.add_argument(
+        "--export_3dgs_init_max_points",
+        type=int,
+        default=0,
+        help="Optional cap on exported init points. 0 means no cap.",
+    )
+    parser.add_argument(
+        "--export_3dgs_init_sample_seed",
+        type=int,
+        default=0,
+        help="RNG seed for exported init point downsampling.",
+    )
+    parser.add_argument(
+        "--export_3dgs_point_space",
+        type=str,
+        default="auto",
+        choices=["auto", "camera", "world"],
+        help="Coordinate space of predicted points for export. auto will detect and convert camera->world when needed.",
+    )
+    parser.add_argument(
+        "--export_3dgs_points_source",
+        type=str,
+        default="world_points",
+        choices=["world_points", "depth"],
+        help="Source for exported 3D points: model world_points or depth unprojection.",
+    )
+    parser.add_argument(
+        "--export_3dgs_apply_viewer_alignment",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Apply the same global alignment transform used by GLB/PLY viewer export.",
+    )
+    parser.add_argument(
+        "--export_3dgs_use_viewer_point_logic",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use the same point filtering/downsample logic as PointCloudViewer (conf threshold + stride).",
+    )
+    parser.add_argument(
+        "--export_3dgs_debug_first_n_frames",
+        type=int,
+        default=0,
+        help="Debug option: only export first N frames to the 3DGS bundle (0 disables).",
     )
 
     args = parser.parse_args()
@@ -525,22 +574,6 @@ def main():
         else:
             print("Depth output not found in predictions; skipping depth export.")
 
-        if "world_points" in predictions:
-            world_points_np = predictions["world_points"].detach().cpu().numpy()
-            world_points_conf_np = None
-            if "world_points_conf" in predictions:
-                world_points_conf_np = predictions["world_points_conf"].detach().cpu().numpy()
-            save_point_cloud_counts(
-                world_points=world_points_np,
-                output_dir=args.save_depth_dir,
-                source_paths=paths,
-                world_points_conf=world_points_conf_np,
-                conf_threshold=args.conf_threshold,
-            )
-            print(f"Saved per-frame point-cloud counts to {args.save_depth_dir}/point_cloud_counts.txt")
-        else:
-            print("world_points output not found in predictions; skipping point-cloud count export.")
-
         if "extrinsic" in predictions and "intrinsic" in predictions:
             extrinsic_np = predictions["extrinsic"].detach().cpu().numpy()
             intrinsic_np = predictions["intrinsic"].detach().cpu().numpy()
@@ -555,18 +588,32 @@ def main():
             print("Camera extrinsic/intrinsic not found in predictions; skipping TUM export.")
 
     if args.export_3dgs_bundle_dir:
-        required_keys = {"world_points", "extrinsic", "intrinsic"}
+        required_keys = {"extrinsic", "intrinsic"}
+        if args.export_3dgs_points_source == "world_points":
+            required_keys.add("world_points")
+        else:
+            required_keys.add("depth")
         missing = [k for k in required_keys if k not in predictions]
         if missing:
             print(f"Missing required keys for 3DGS export: {missing}. Skipping bundle export.")
         else:
-            world_points_np = predictions["world_points"].detach().cpu().numpy()
             extrinsic_np = predictions["extrinsic"].detach().cpu().numpy()
             intrinsic_np = predictions["intrinsic"].detach().cpu().numpy()
             images_np = images_cpu.detach().cpu().numpy()
-            world_points_conf_np = None
-            if "world_points_conf" in predictions:
-                world_points_conf_np = predictions["world_points_conf"].detach().cpu().numpy()
+
+            if args.export_3dgs_points_source == "depth":
+                depth_np = predictions["depth"].detach().cpu().numpy()
+                # Keep behavior identical to PointCloudViewer._process_pred_dict:
+                # pass `predictions["extrinsic"]` directly.
+                world_points_np = unproject_depth_map_to_point_map(depth_np, extrinsic_np, intrinsic_np)
+                world_points_conf_np = None
+                if "depth_conf" in predictions:
+                    world_points_conf_np = predictions["depth_conf"].detach().cpu().numpy()
+            else:
+                world_points_np = predictions["world_points"].detach().cpu().numpy()
+                world_points_conf_np = None
+                if "world_points_conf" in predictions:
+                    world_points_conf_np = predictions["world_points_conf"].detach().cpu().numpy()
             export_lingbot_gs_bundle(
                 output_dir=args.export_3dgs_bundle_dir,
                 source_paths=paths,
@@ -577,6 +624,14 @@ def main():
                 world_points_conf=world_points_conf_np,
                 conf_threshold=args.conf_threshold,
                 copy_images=args.export_3dgs_copy_images,
+                init_sample_ratio=args.export_3dgs_init_sample_ratio,
+                init_max_points=args.export_3dgs_init_max_points,
+                init_sample_seed=args.export_3dgs_init_sample_seed,
+                point_space=args.export_3dgs_point_space,
+                apply_viewer_alignment=args.export_3dgs_apply_viewer_alignment,
+                use_viewer_point_logic=args.export_3dgs_use_viewer_point_logic,
+                viewer_downsample_factor=args.downsample_factor,
+                debug_first_n_frames=args.export_3dgs_debug_first_n_frames,
             )
             print(f"Exported 3DGS bridge bundle to {args.export_3dgs_bundle_dir}")
 

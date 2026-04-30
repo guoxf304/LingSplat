@@ -497,6 +497,13 @@ class PointCloudViewer:
                 "Export GLB",
                 hint="Export current filtered point clouds and cameras as GLB.",
             )
+            self.ply_output_path = self.server.gui.add_text(
+                "PLY Output Path", initial_value="export.ply"
+            )
+            self.ply_export_button = self.server.gui.add_button(
+                "Export PLY",
+                hint="Export current filtered point clouds as PLY (same filtering/alignment as GLB).",
+            )
             self.glb_status = self.server.gui.add_text("Status", initial_value="Ready")
 
         @self.glb_mode_dropdown.on_update
@@ -508,6 +515,10 @@ class PointCloudViewer:
         @self.glb_export_button.on_click
         def _(_) -> None:
             self._export_glb()
+
+        @self.ply_export_button.on_click
+        def _(_) -> None:
+            self._export_ply()
 
         # Video saving controls
         with self.server.gui.add_folder("Video Saving"):
@@ -632,31 +643,10 @@ class PointCloudViewer:
         self.glb_status.value = "Collecting points..."
         print("Exporting GLB...")
 
-        # Collect all currently visible, filtered points and colors
-        all_points = []
-        all_colors = []
-        for step in self.all_steps:
-            pc = self.pcs[step]["pc"]
-            color = self.pcs[step]["color"]
-            conf = self.pcs[step]["conf"]
-            edge_color = self.pcs[step].get("edge_color", None)
-
-            pts, cols = self.parse_pc_data(
-                pc, color, conf, edge_color, set_border_color=False,
-                downsample_factor=self.downsample_slider.value,
-            )
-            if len(pts) > 0:
-                all_points.append(pts)
-                if cols.dtype != np.uint8:
-                    cols = (np.clip(cols, 0, 1) * 255).astype(np.uint8)
-                all_colors.append(cols)
-
-        if not all_points:
+        vertices, colors_rgb = self._collect_export_points()
+        if vertices is None or colors_rgb is None:
             self.glb_status.value = "Error: no points to export"
             return
-
-        vertices = np.concatenate(all_points, axis=0)
-        colors_rgb = np.concatenate(all_colors, axis=0)
 
         # --- Color enhancement ---
         colors_float = colors_rgb.astype(np.float32) / 255.0
@@ -792,6 +782,107 @@ class PointCloudViewer:
         mode_str = f"spheres r={self.glb_sphere_radius_slider.value}" if export_mode == "Spheres" else "points"
         self.glb_status.value = f"Saved: {output_path} ({n_pts:,} {mode_str})"
         print(f"GLB exported to {output_path} ({n_pts:,} {mode_str})")
+
+    def _collect_export_points(self):
+        """Collect current filtered points/colors used by GLB/PLY export."""
+        all_points = []
+        all_colors = []
+        for step in self.all_steps:
+            pc = self.pcs[step]["pc"]
+            color = self.pcs[step]["color"]
+            conf = self.pcs[step]["conf"]
+            edge_color = self.pcs[step].get("edge_color", None)
+
+            pts, cols = self.parse_pc_data(
+                pc, color, conf, edge_color, set_border_color=False,
+                downsample_factor=self.downsample_slider.value,
+            )
+            if len(pts) > 0:
+                all_points.append(pts)
+                if cols.dtype != np.uint8:
+                    cols = (np.clip(cols, 0, 1) * 255).astype(np.uint8)
+                all_colors.append(cols)
+
+        if not all_points:
+            return None, None
+        return np.concatenate(all_points, axis=0), np.concatenate(all_colors, axis=0)
+
+    def _export_ply(self):
+        """Export current filtered point cloud as PLY using GLB-equivalent processing."""
+        self.glb_status.value = "Collecting points for PLY..."
+        print("Exporting PLY...")
+
+        vertices, colors_rgb = self._collect_export_points()
+        if vertices is None or colors_rgb is None:
+            self.glb_status.value = "Error: no points to export"
+            return
+
+        # Keep color enhancement behavior aligned with GLB export.
+        colors_float = colors_rgb.astype(np.float32) / 255.0
+        sat_boost = self.glb_saturation_slider.value
+        if sat_boost != 1.0:
+            gray = colors_float.mean(axis=1, keepdims=True)
+            colors_float = gray + sat_boost * (colors_float - gray)
+
+        bri_boost = self.glb_brightness_slider.value
+        if bri_boost != 1.0:
+            colors_float = colors_float * bri_boost
+        colors_float = np.clip(colors_float, 0.0, 1.0)
+
+        alpha = self.glb_opacity_slider.value
+        if alpha < 1.0:
+            bg = np.ones_like(colors_float)
+            colors_float = colors_float * alpha + bg * (1.0 - alpha)
+            colors_float = np.clip(colors_float, 0.0, 1.0)
+        colors_u8 = (colors_float * 255).astype(np.uint8)
+
+        # Apply same scene alignment as GLB so coordinates match exports.
+        if self.cam_dict is not None and len(self.all_steps) > 0:
+            from lingbot_map.vis.glb_export import get_opengl_conversion_matrix
+            from scipy.spatial.transform import Rotation
+
+            step0 = self.all_steps[0]
+            R0 = self.cam_dict["R"][step0] if "R" in self.cam_dict else np.eye(3)
+            t0 = self.cam_dict["t"][step0] if "t" in self.cam_dict else np.zeros(3)
+            c2w_0 = np.eye(4)
+            c2w_0[:3, :3] = R0
+            c2w_0[:3, 3] = t0
+            w2c_0 = np.linalg.inv(c2w_0)
+
+            align_rotation = np.eye(4)
+            align_rotation[:3, :3] = Rotation.from_euler("y", 180, degrees=True).as_matrix()
+            transform = np.linalg.inv(w2c_0) @ get_opengl_conversion_matrix() @ align_rotation
+
+            vertices_h = np.concatenate(
+                [vertices, np.ones((vertices.shape[0], 1), dtype=vertices.dtype)], axis=1
+            )
+            vertices = (vertices_h @ transform.T)[:, :3]
+
+        output_path = self.ply_output_path.value
+        header = "\n".join(
+            [
+                "ply",
+                "format ascii 1.0",
+                f"element vertex {vertices.shape[0]}",
+                "property float x",
+                "property float y",
+                "property float z",
+                "property uchar red",
+                "property uchar green",
+                "property uchar blue",
+                "end_header",
+            ]
+        )
+
+        tmp_path = output_path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            f.write(header + "\n")
+            for (x, y, z), (r, g, b) in zip(vertices, colors_u8):
+                f.write(f"{x:.8f} {y:.8f} {z:.8f} {int(r)} {int(g)} {int(b)}\n")
+        os.replace(tmp_path, output_path)
+
+        self.glb_status.value = f"Saved PLY: {output_path} ({vertices.shape[0]:,} points)"
+        print(f"PLY exported to {output_path} ({vertices.shape[0]:,} points)")
 
     @staticmethod
     def _build_trajectory_tube(positions, radius, colormap, num_cameras):
