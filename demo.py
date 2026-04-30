@@ -632,6 +632,7 @@ def main():
                 use_viewer_point_logic=args.export_3dgs_use_viewer_point_logic,
                 viewer_downsample_factor=args.downsample_factor,
                 debug_first_n_frames=args.export_3dgs_debug_first_n_frames,
+                trajectory_use_viewer_logic=True,
             )
             print(f"Exported 3DGS bridge bundle to {args.export_3dgs_bundle_dir}")
 

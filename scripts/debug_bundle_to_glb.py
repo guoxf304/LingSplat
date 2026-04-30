@@ -47,17 +47,6 @@ def _load_tum_c2w(path: Path) -> np.ndarray:
     return np.stack(mats, axis=0)
 
 
-def _pose_score_look_at_center(c2w: np.ndarray, center: np.ndarray) -> float:
-    """Higher is better: cameras' forward vectors point toward scene center."""
-    cams = c2w[:, :3, 3]
-    forward = c2w[:, :3, 2]  # keep consistent with viewer usage
-    to_center = center[None, :] - cams
-    n1 = np.linalg.norm(forward, axis=1, keepdims=True) + 1e-8
-    n2 = np.linalg.norm(to_center, axis=1, keepdims=True) + 1e-8
-    cos = (forward / n1 * (to_center / n2)).sum(axis=1)
-    return float(np.mean(cos))
-
-
 def _trajectory_lines(c2w: np.ndarray, radius: float) -> trimesh.Trimesh | None:
     if len(c2w) < 2:
         return None
@@ -109,9 +98,9 @@ def main() -> None:
     parser.add_argument(
         "--pose_convention",
         type=str,
-        default="auto",
-        choices=["auto", "c2w", "w2c"],
-        help="Interpretation of trajectory pose file.",
+        default="c2w",
+        choices=["c2w", "w2c"],
+        help="Interpretation of trajectory pose file. Default c2w (no auto conversion).",
     )
     args = parser.parse_args()
 
@@ -181,26 +170,15 @@ def main() -> None:
     lo = np.percentile(points, 5, axis=0)
     hi = np.percentile(points, 95, axis=0)
     scene_scale = max(float(np.linalg.norm(hi - lo)), 0.1)
-    scene_center = np.median(points, axis=0)
     cam_size = scene_scale * args.cam_scale
 
     c2w_raw = _load_tum_c2w(traj_path)
-    c2w_from_w2c = np.linalg.inv(c2w_raw)
-    if args.pose_convention == "c2w":
+    if args.pose_convention == "w2c":
+        c2w = np.linalg.inv(c2w_raw)
+        pose_used = "w2c->c2w (manual)"
+    else:
         c2w = c2w_raw
         pose_used = "c2w"
-    elif args.pose_convention == "w2c":
-        c2w = c2w_from_w2c
-        pose_used = "w2c->c2w"
-    else:
-        s_raw = _pose_score_look_at_center(c2w_raw, scene_center)
-        s_inv = _pose_score_look_at_center(c2w_from_w2c, scene_center)
-        if s_inv > s_raw:
-            c2w = c2w_from_w2c
-            pose_used = "auto(w2c->c2w)"
-        else:
-            c2w = c2w_raw
-            pose_used = "auto(c2w)"
 
     cmap = trimesh.visual.color.interpolate(np.linspace(0, 1, len(c2w)), color_map="viridis")
     for i in range(len(c2w)):

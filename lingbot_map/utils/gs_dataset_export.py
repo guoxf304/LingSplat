@@ -113,6 +113,7 @@ def export_lingbot_gs_bundle(
     use_viewer_point_logic: bool = False,
     viewer_downsample_factor: int = 32,
     debug_first_n_frames: int = 0,
+    trajectory_use_viewer_logic: bool = True,
 ) -> None:
     """Export a bundle consumed by custom 3DGS LingBot reader."""
     out = Path(output_dir)
@@ -149,6 +150,16 @@ def export_lingbot_gs_bundle(
     point_space_used = point_space
     if point_space not in {"auto", "camera", "world"}:
         raise ValueError(f"point_space must be one of auto/camera/world, got {point_space}")
+
+    # Build trajectory poses with viewer-compatible rule, while keeping point
+    # processing on the original extrinsic path.
+    if trajectory_use_viewer_logic:
+        extr_4x4 = np.zeros((extrinsic_c2w.shape[0], 4, 4), dtype=np.float32)
+        extr_4x4[:, :3, :4] = extrinsic_c2w
+        extr_4x4[:, 3, 3] = 1.0
+        traj_c2w = np.linalg.inv(extr_4x4)[:, :3, :4]
+    else:
+        traj_c2w = extrinsic_c2w.copy()
 
     if point_space == "auto":
         pts_flat = points.reshape(-1, 3)
@@ -201,10 +212,16 @@ def export_lingbot_gs_bundle(
         c2w_4x4 = np.einsum("ij,sjk->sik", align_t, c2w_4x4)
         extrinsic_c2w = c2w_4x4[:, :3, :4]
 
+        traj_4x4 = np.zeros((traj_c2w.shape[0], 4, 4), dtype=np.float32)
+        traj_4x4[:, :3, :4] = traj_c2w
+        traj_4x4[:, 3, 3] = 1.0
+        traj_4x4 = np.einsum("ij,sjk->sik", align_t, traj_4x4)
+        traj_c2w = traj_4x4[:, :3, :4]
+
     # IMPORTANT: write trajectory/intrinsics after all coordinate transforms,
     # so camera files and exported points stay in the same frame.
     save_camera_tum_trajectory(
-        extrinsic_c2w=extrinsic_c2w,
+        extrinsic_c2w=traj_c2w,
         intrinsic=intrinsic,
         output_dir=str(out),
         filename="camera_trajectory_tum.txt",
@@ -318,6 +335,7 @@ def export_lingbot_gs_bundle(
         "apply_viewer_alignment": bool(apply_viewer_alignment),
         "use_viewer_point_logic": bool(use_viewer_point_logic),
         "viewer_downsample_factor": int(max(1, viewer_downsample_factor)),
+        "trajectory_use_viewer_logic": bool(trajectory_use_viewer_logic),
     }
     with (out / "meta.json").open("w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)

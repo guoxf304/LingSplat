@@ -6,6 +6,7 @@ checkpoints/
 
 # 3DGS 与 SLAM 生成文件
 *.ply
+*.glb
 outputs/
 renders/
 cameras.json
